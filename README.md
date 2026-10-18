@@ -1,5 +1,8 @@
 # tragent CLI
 
+[![npm](https://img.shields.io/npm/v/@tragent/cli?color=6a2bc4&label=npm)](https://www.npmjs.com/package/@tragent/cli)
+[![release](https://img.shields.io/github/v/release/tragent-io/cli?color=6a2bc4&label=release)](https://github.com/tragent-io/cli/releases)
+
 Test whether AI shopping agents can find, price and buy from your store, from
 your terminal or your CI pipeline. Learn more at [tragent.io](https://tragent.io).
 
@@ -62,6 +65,14 @@ include:
 
 Set `TRAGENT_API_KEY` as a masked CI/CD variable. The template is in
 [`gitlab/.tragent.yml`](gitlab/.tragent.yml).
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Passed the gate |
+| `1` | The gate failed: a regression, a failing stage, or a score below the floor |
+| `2` | Nothing was measured: bad flags, an unreachable API, or a run that errored |
 
 ## Support
 
