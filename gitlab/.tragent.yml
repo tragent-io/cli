@@ -1,0 +1,77 @@
+# tragent agent readiness — GitLab CI template.
+#
+# Include it and set the variables:
+#
+#   include:
+#     - remote: 'https://raw.githubusercontent.com/tragent-io/cli/v1/gitlab/.tragent.yml'
+#
+#   tragent:agent-readiness:
+#     variables:
+#       TRAGENT_TARGET: https://staging.acme.example
+#       TRAGENT_SUITE: suites/retail-core.yaml
+#
+# TRAGENT_API_KEY belongs in a masked, protected CI/CD variable — never here.
+
+variables:
+  TRAGENT_API_URL: "https://api.tragent.io"
+  # checks is fast and free of model calls; test runs the full simulation.
+  TRAGENT_KIND: ""
+  TRAGENT_SUITE: ""
+  TRAGENT_SUITE_ID: ""
+  TRAGENT_PROJECT: ""
+  TRAGENT_TIMEOUT: "30m"
+  TRAGENT_REPORT_PATH: "tragent-report.md"
+  TRAGENT_CLI_VERSION: "latest"
+  # Set to "false" to report without failing the pipeline.
+  TRAGENT_GATE: "true"
+
+.tragent:install: &tragent_install
+  - |
+    set -euo pipefail
+    os=$(uname -s | tr '[:upper:]' '[:lower:]')
+    arch=$(uname -m); [ "$arch" = "x86_64" ] && arch=amd64; [ "$arch" = "aarch64" ] && arch=arm64
+    # GitHub serves "latest" at releases/latest/download/ and a pinned tag at
+    # releases/download/<tag>/; the second form is not the first with a tag in it.
+    if [ "$TRAGENT_CLI_VERSION" = "latest" ]; then rel="latest/download"; else rel="download/${TRAGENT_CLI_VERSION}"; fi
+    url="https://github.com/tragent-io/cli/releases/${rel}/tragent_${os}_${arch}.tar.gz"
+    if curl -fsSL "$url" -o /tmp/tragent.tar.gz; then
+      tar -xzf /tmp/tragent.tar.gz -C /usr/local/bin tragent
+    else
+      # The source is private, so there is no go install to fall back to.
+      echo "No release asset at $url. Check TRAGENT_CLI_VERSION against https://github.com/tragent-io/cli/releases" >&2
+      exit 2
+    fi
+    chmod +x /usr/local/bin/tragent
+
+tragent:agent-readiness:
+  stage: test
+  image: golang:1.26
+  script:
+    - *tragent_install
+    - |
+      set -uo pipefail
+      args=(test --target "$TRAGENT_TARGET" --trigger ci
+            --ref "$CI_COMMIT_REF_NAME" --sha "$CI_COMMIT_SHA"
+            --branch "$CI_COMMIT_BRANCH" --timeout "$TRAGENT_TIMEOUT"
+            --wait --out "$TRAGENT_REPORT_PATH")
+      [ -n "$TRAGENT_SUITE" ]    && args+=(--suite "$TRAGENT_SUITE")
+      [ -n "$TRAGENT_SUITE_ID" ] && args+=(--suite-id "$TRAGENT_SUITE_ID")
+      [ -n "$TRAGENT_PROJECT" ]  && args+=(--project "$TRAGENT_PROJECT")
+      [ -n "$TRAGENT_KIND" ]     && args+=(--kind "$TRAGENT_KIND")
+      [ "$TRAGENT_GATE" = "true" ] && args+=(--gate)
+
+      tragent "${args[@]}"
+      code=$?
+      # Keep the report as an artifact whichever way the gate went: a red
+      # pipeline is only useful if the evidence survives it.
+      exit $code
+  artifacts:
+    when: always
+    paths:
+      - "$TRAGENT_REPORT_PATH"
+    expire_in: 30 days
+  rules:
+    - if: '$TRAGENT_API_KEY == null'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'

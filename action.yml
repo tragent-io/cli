@@ -1,0 +1,215 @@
+name: tragent agent readiness
+description: >
+  Run tragent's agent-compatibility suite against a deployed environment and
+  gate the build on the result.
+author: tragent
+branding:
+  icon: check-circle
+  color: purple
+
+inputs:
+  api-key:
+    description: "tragent API key (tk_live_…). Store it as a repository secret."
+    required: true
+  api-url:
+    description: "tragent API root."
+    required: false
+    default: "https://api.tragent.io"
+  target:
+    description: "Target id, or the base URL of a registered target."
+    required: true
+  suite:
+    description: "Path to the suite YAML in this repository."
+    required: false
+    default: ""
+  suite-id:
+    description: "Id of a suite stored on the project, instead of `suite`."
+    required: false
+    default: ""
+  project:
+    description: "Project id, slug or name. Optional when the org has one project."
+    required: false
+    default: ""
+  kind:
+    description: "checks (fast, no model calls) or test (full agent simulation)."
+    required: false
+    default: ""
+  gate:
+    description: "Fail the build when the suite's gate fails."
+    required: false
+    default: "true"
+  wait:
+    description: "Wait for the run to finish. Required for gating and reporting."
+    required: false
+    default: "true"
+  comment:
+    description: "Post the result to the pull request. Needs pull-requests: write."
+    required: false
+    default: "false"
+  timeout:
+    description: "How long to wait for the run, e.g. 20m."
+    required: false
+    default: "30m"
+  version:
+    description: "CLI version to install: `latest`, a release tag (v1.2.3), or `source` to build from this repo."
+    required: false
+    default: "latest"
+  report-path:
+    description: "Where to write the Markdown report."
+    required: false
+    default: "tragent-report.md"
+
+outputs:
+  run-id:
+    description: "The run's id."
+    value: ${{ steps.run.outputs.run-id }}
+  score:
+    description: "Readiness score 0–100, empty when the run produced none."
+    value: ${{ steps.run.outputs.score }}
+  status:
+    description: "Terminal run status: passed, warned, failed or errored."
+    value: ${{ steps.run.outputs.status }}
+  gate:
+    description: "passed or failed."
+    value: ${{ steps.run.outputs.gate }}
+  report-path:
+    description: "Path to the Markdown report written by this action."
+    value: ${{ inputs.report-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install the tragent CLI
+      shell: bash
+      env:
+        TRAGENT_CLI_VERSION: ${{ inputs.version }}
+        # The repository this action was loaded from, so a fork's action
+        # installs the fork's releases. Empty when the action is used by path
+        # (uses: ./ci/github-action).
+        TRAGENT_ACTION_REPO: ${{ github.action_repository }}
+      run: |
+        set -euo pipefail
+        exe=""; [ "${RUNNER_OS}" = "Windows" ] && exe=".exe"
+        bin="${RUNNER_TEMP}/tragent${exe}"
+        if [ "${TRAGENT_CLI_VERSION}" = "source" ]; then
+          # Building from source keeps this action usable inside the tragent
+          # repository itself, before any release exists.
+          go build -o "$bin" ./cmd/tragent
+        else
+          # RUNNER_OS/RUNNER_ARCH rather than uname: on Windows runners uname
+          # reports MINGW64_NT-…, which matches no release asset.
+          case "${RUNNER_OS}" in
+            Linux) os=linux ;; macOS) os=darwin ;; Windows) os=windows ;;
+            *) echo "unsupported runner OS ${RUNNER_OS}" >&2; exit 2 ;;
+          esac
+          case "${RUNNER_ARCH}" in
+            X64) arch=amd64 ;; ARM64) arch=arm64 ;;
+            *) echo "unsupported runner arch ${RUNNER_ARCH}" >&2; exit 2 ;;
+          esac
+          ext=tar.gz; [ "$os" = windows ] && ext=zip
+          asset="tragent_${os}_${arch}.${ext}"
+          repo="${TRAGENT_ACTION_REPO:-tragent-io/cli}"
+          if [ "${TRAGENT_CLI_VERSION}" = "latest" ]; then
+            base="https://github.com/${repo}/releases/latest/download"
+          else
+            base="https://github.com/${repo}/releases/download/${TRAGENT_CLI_VERSION}"
+          fi
+          dl="${RUNNER_TEMP}/tragent-dl"; mkdir -p "$dl"
+          if curl -fsSL --retry 3 "${base}/${asset}" -o "${dl}/${asset}" \
+             && curl -fsSL --retry 3 "${base}/checksums.txt" -o "${dl}/checksums.txt"; then
+            # A mismatch is a hard failure, never a fallback: it means the
+            # download is not what the release published.
+            want=$(awk -v f="$asset" '$2 == f {print $1}' "${dl}/checksums.txt")
+            if command -v sha256sum >/dev/null; then got=$(sha256sum "${dl}/${asset}" | awk '{print $1}')
+            else got=$(shasum -a 256 "${dl}/${asset}" | awk '{print $1}'); fi
+            if [ -z "$want" ] || [ "$want" != "$got" ]; then
+              echo "checksum mismatch for ${asset}: want '${want}', got '${got}'" >&2; exit 2
+            fi
+            if [ "$ext" = zip ]; then unzip -oq "${dl}/${asset}" "tragent${exe}" -d "${RUNNER_TEMP}"
+            else tar -xzf "${dl}/${asset}" -C "${RUNNER_TEMP}" tragent; fi
+          else
+            # The source is private, so there is no go install to fall back to:
+            # a missing asset is a clear failure, not a confusing build error.
+            echo "No release asset at ${base}/${asset}. Check cli-version against https://github.com/tragent-io/cli/releases" >&2
+            exit 2
+          fi
+        fi
+        chmod +x "$bin"
+        "$bin" version
+        echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
+
+    - name: Run the agent-readiness suite
+      id: run
+      shell: bash
+      env:
+        TRAGENT_API_URL: ${{ inputs.api-url }}
+        TRAGENT_API_KEY: ${{ inputs.api-key }}
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_SUITE: ${{ inputs.suite }}
+        INPUT_SUITE_ID: ${{ inputs.suite-id }}
+        INPUT_PROJECT: ${{ inputs.project }}
+        INPUT_KIND: ${{ inputs.kind }}
+        INPUT_GATE: ${{ inputs.gate }}
+        INPUT_WAIT: ${{ inputs.wait }}
+        INPUT_TIMEOUT: ${{ inputs.timeout }}
+        INPUT_REPORT_PATH: ${{ inputs.report-path }}
+      run: |
+        set -uo pipefail
+        args=(test --target "$INPUT_TARGET" --trigger ci
+              --ref "$GITHUB_REF" --sha "$GITHUB_SHA"
+              --timeout "$INPUT_TIMEOUT" --out "$INPUT_REPORT_PATH")
+        [ -n "$INPUT_SUITE" ]    && args+=(--suite "$INPUT_SUITE")
+        [ -n "$INPUT_SUITE_ID" ] && args+=(--suite-id "$INPUT_SUITE_ID")
+        [ -n "$INPUT_PROJECT" ]  && args+=(--project "$INPUT_PROJECT")
+        [ -n "$INPUT_KIND" ]     && args+=(--kind "$INPUT_KIND")
+        [ "$INPUT_WAIT" = "true" ] && args+=(--wait)
+        [ "$INPUT_GATE" = "true" ] && args+=(--gate)
+
+        # The exit code is the verdict, so capture it rather than letting -e
+        # end the step before the outputs are written.
+        tragent "${args[@]}" | tee "${RUNNER_TEMP}/tragent-output.txt"
+        code=${PIPESTATUS[0]}
+
+        run_id=$(grep -oE '^run [0-9a-f-]{36}$' "${RUNNER_TEMP}/tragent-output.txt" | head -1 | awk '{print $2}' || true)
+        echo "run-id=${run_id}" >> "$GITHUB_OUTPUT"
+        if [ -f "$INPUT_REPORT_PATH" ]; then
+          score=$(grep -oE '^\*\*[0-9]+ / 100\*\*' "$INPUT_REPORT_PATH" | head -1 | grep -oE '[0-9]+' | head -1 || true)
+          status=$(grep -oE '^\*\*[0-9]+ / 100\*\* · [a-z]+' "$INPUT_REPORT_PATH" | head -1 | awk '{print $NF}' || true)
+          echo "score=${score}" >> "$GITHUB_OUTPUT"
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+        fi
+        if [ "$code" -eq 0 ]; then echo "gate=passed" >> "$GITHUB_OUTPUT"; else echo "gate=failed" >> "$GITHUB_OUTPUT"; fi
+        echo "TRAGENT_EXIT_CODE=${code}" >> "$GITHUB_ENV"
+        echo "TRAGENT_RUN_ID=${run_id}" >> "$GITHUB_ENV"
+
+    - name: Comment on the pull request
+      if: ${{ inputs.comment == 'true' && github.event_name == 'pull_request' && env.TRAGENT_RUN_ID != '' }}
+      shell: bash
+      env:
+        TRAGENT_API_URL: ${{ inputs.api-url }}
+        TRAGENT_API_KEY: ${{ inputs.api-key }}
+        GITHUB_TOKEN: ${{ github.token }}
+        INPUT_SUITE: ${{ inputs.suite }}
+      run: |
+        set -uo pipefail
+        args=(comment "$TRAGENT_RUN_ID" --repo "$GITHUB_REPOSITORY" --pr "${{ github.event.pull_request.number }}")
+        [ -n "$INPUT_SUITE" ] && args+=(--suite "$INPUT_SUITE")
+        # A comment is a courtesy; failing the job over it would hide the
+        # actual readiness verdict behind a permissions problem.
+        tragent "${args[@]}" || echo "::warning::could not post the pull request comment"
+
+    - name: Upload the report
+      if: ${{ always() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: tragent-report
+        path: ${{ inputs.report-path }}
+        if-no-files-found: ignore
+
+    - name: Apply the gate
+      if: ${{ inputs.gate == 'true' }}
+      shell: bash
+      run: |
+        # Re-raise the CLI's verdict after the report and comment have been
+        # produced, so a red build still leaves the evidence behind.
+        exit "${TRAGENT_EXIT_CODE:-0}"
