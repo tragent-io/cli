@@ -65,4 +65,5 @@ Set `TRAGENT_API_KEY` as a masked CI/CD variable. The template is in
 
 ## Support
 
-hello@tragent.io
+Open an [issue](https://github.com/tragent-io/cli/issues) or email
+[hellotragent@gmail.com](mailto:hellotragent@gmail.com).
